@@ -1,0 +1,37 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+import statsmodels.api as sm
+
+df = pd.read_csv("country_ranking.csv")
+df["ROI"] = df["ROI"].str.rstrip("%").astype(float)
+
+x = df["Annual t"]
+y = df["ROI"]
+
+# Fit OLS. statsmodels doesn't add an intercept by default — add_constant does that.
+X = sm.add_constant(x)
+model = sm.OLS(y, X).fit()
+print(model.summary())
+
+# Build a smooth x-range for plotting the fit + band
+x_fit = np.linspace(x.min(), x.max(), 100)
+X_fit = sm.add_constant(x_fit)
+
+pred = model.get_prediction(X_fit).summary_frame(alpha=0.05)  # 95% intervals
+# pred columns: mean, mean_se, mean_ci_lower, mean_ci_upper, obs_ci_lower, obs_ci_upper
+
+# Plot
+plt.scatter(x, y, label="Data")
+plt.plot(x_fit, pred["mean"], color="red", label="Line of best fit")
+plt.fill_between(x_fit, pred["mean_ci_lower"], pred["mean_ci_upper"],
+                 color="red", alpha=0.2, label="95% confidence interval")
+# Optional wider band — uncertainty on where a new point would fall:
+# plt.fill_between(x_fit, pred["obs_ci_lower"], pred["obs_ci_upper"],
+#                  color="grey", alpha=0.15, label="95% prediction interval")
+
+plt.xlabel("Annual Tonnage")
+plt.ylabel("ROI (%)")
+plt.title("Country Ranking by ROI")
+plt.legend()
+plt.show()
