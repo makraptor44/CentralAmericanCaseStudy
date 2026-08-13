@@ -1,0 +1,213 @@
+"""
+Central American shipping-infrastructure ROI model.
+
+Reads annual import tonnages per good per country from
+CA_imports_by_country.csv, computes the capital investment needed for
+ports, ships and warehouses, the annual revenue from freight and port
+fees, and the resulting ROI and payback period for each country.
+
+Output: sorted ranking of countries by ROI, plus a full per-country
+breakdown. Change any parameter in the ASSUMPTIONS block to run
+sensitivity scenarios.
+"""
+
+import csv
+import math
+from collections import defaultdict
+
+CSV_PATH = "CA_imports_by_country (1).csv"
+
+# ==========================================================
+# ASSUMPTIONS
+# ==========================================================
+
+# --- Capital costs (USD) ---
+COST_CONTAINER_PORT   = 1_000_000_000    # mid-sized container terminal
+COST_BULK_PORT        = 500_000_000      # mid-sized dry bulk terminal
+COST_TANKER_PORT      = 700_000_000      # liquid bulk / tanker terminal
+COST_CONTAINER_SHIP   = 35_000_000       # small feeder, ~1500 TEU
+COST_BULK_SHIP        = 35_000_000       # Handysize, ~30k DWT
+COST_TANKER_SHIP      = 55_000_000       # MR product tanker, ~40k DWT
+COST_WAREHOUSE_PER_T  = 500              # $/tonne of storage capacity
+
+# --- Operational parameters ---
+LOADING_DAYS = {
+    "container": 1.5,
+    "bulk":      4.0,
+    "tanker":    1.5,
+}
+TRANSIT_DAYS_ONE_WAY = 5
+LOAD_DAYS_ORIGIN     = 1
+BERTH_UTILIZATION    = 0.60
+SAFETY_STOCK_DAYS    = 30
+
+# --- Ship capacities (tonnes) ---
+SHIP_CAPACITY = {
+    "container": 20_000,   # ~1500 TEU at 14 t/TEU
+    "bulk":      30_000,   # Handysize
+    "tanker":    40_000,   # MR
+}
+
+# --- Revenue side ---
+FREIGHT_RATE = {   # $/tonne
+    "container": 100,
+    "bulk":       25,
+    "tanker":     15,
+}
+PORT_FEE_PER_TONNE   = 16
+OPEX_RATIO           = 0.25    # opex as fraction of revenue
+AMORTIZATION_YEARS   = 30      # for reference; capex is compared to annual income
+
+# ==========================================================
+# READ DATA
+# ==========================================================
+
+def read_csv(path):
+    """Returns {country: {ship_class: total_annual_tonnes}}."""
+    data = defaultdict(lambda: defaultdict(float))
+    with open(path, newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            country = row["country"]
+            ship_class = row["ship_class"]
+            tonnes = float(row["annual_tonnes"])
+            data[country][ship_class] += tonnes
+    return data
+
+
+# ==========================================================
+# COMPUTE ROI FOR ONE COUNTRY
+# ==========================================================
+
+def compute_country_roi(country, tonnes_by_class):
+    """Given a dict of {ship_class: annual_tonnes}, compute infrastructure
+    cost, annual revenue, net income and ROI."""
+    total_annual_tonnes = sum(tonnes_by_class.values())
+    total_daily_tonnes  = total_annual_tonnes / 365
+
+    port_counts, ship_counts = {}, {}
+    total_warehouse_t = 0
+
+    for cls in ["container", "bulk", "tanker"]:
+        annual_t = tonnes_by_class.get(cls, 0)
+        if annual_t == 0:
+            port_counts[cls] = 0
+            ship_counts[cls] = 0
+            continue
+
+        daily_t         = annual_t / 365
+        capacity        = SHIP_CAPACITY[cls]
+        load_days_dest  = LOADING_DAYS[cls]
+
+        annual_arrivals = annual_t / capacity
+        round_trip_days = 2 * TRANSIT_DAYS_ONE_WAY + load_days_dest + LOAD_DAYS_ORIGIN
+        fleet_size      = annual_arrivals * round_trip_days / 365
+        berth_days      = annual_arrivals * load_days_dest
+        berths_needed   = berth_days / (365 * BERTH_UTILIZATION)
+
+        port_counts[cls] = max(1, math.ceil(berths_needed))
+        ship_counts[cls] = max(1, math.ceil(fleet_size))
+        total_warehouse_t += daily_t * SAFETY_STOCK_DAYS
+
+    # --- Capital cost ---
+    port_cost = (port_counts["container"] * COST_CONTAINER_PORT
+               + port_counts["bulk"]      * COST_BULK_PORT
+               + port_counts["tanker"]    * COST_TANKER_PORT)
+    fleet_cost = (ship_counts["container"] * COST_CONTAINER_SHIP
+                + ship_counts["bulk"]      * COST_BULK_SHIP
+                + ship_counts["tanker"]    * COST_TANKER_SHIP)
+    warehouse_cost = total_warehouse_t * COST_WAREHOUSE_PER_T
+    total_capex = port_cost + fleet_cost + warehouse_cost
+
+    # --- Revenue ---
+    freight_revenue = sum(tonnes_by_class.get(cls, 0) * FREIGHT_RATE[cls]
+                          for cls in FREIGHT_RATE)
+    port_revenue    = total_annual_tonnes * PORT_FEE_PER_TONNE
+    total_revenue   = freight_revenue + port_revenue
+
+    # --- Net income & ROI ---
+    net_income   = total_revenue * (1 - OPEX_RATIO)
+    roi          = net_income / total_capex if total_capex > 0 else 0
+    payback_yrs  = total_capex / net_income if net_income > 0 else float("inf")
+
+    return {
+        "country":              country,
+        "total_annual_tonnes":  total_annual_tonnes,
+        "daily_tonnes":         total_daily_tonnes,
+        "container_ports":      port_counts["container"],
+        "bulk_ports":           port_counts["bulk"],
+        "tanker_ports":         port_counts["tanker"],
+        "container_ships":      ship_counts["container"],
+        "bulk_ships":           ship_counts["bulk"],
+        "tanker_ships":         ship_counts["tanker"],
+        "warehouse_tonnes":     total_warehouse_t,
+        "port_capex":           port_cost,
+        "fleet_capex":          fleet_cost,
+        "warehouse_capex":      warehouse_cost,
+        "total_capex":          total_capex,
+        "annual_revenue":       total_revenue,
+        "annual_net_income":    net_income,
+        "roi":                  roi,
+        "payback_years":        payback_yrs,
+    }
+
+
+# ==========================================================
+# MAIN
+# ==========================================================
+
+def main():
+    data = read_csv(CSV_PATH)
+
+    results = []
+    for country, tonnes_by_class in data.items():
+        results.append(compute_country_roi(country, tonnes_by_class))
+
+    results.sort(key=lambda r: r["roi"], reverse=True)
+
+    # --- Print ranking table ---
+    print("=" * 96)
+    print("CENTRAL AMERICAN SHIPPING INFRASTRUCTURE — ROI BY COUNTRY")
+    print("=" * 96)
+    print(f"{'Rank':>4}  {'Country':<14}{'Annual t':>13}{'Capex $':>16}"
+          f"{'Revenue $/yr':>16}{'Net $/yr':>16}{'ROI':>8}{'Payback':>10}")
+    print("-" * 96)
+    for i, r in enumerate(results, 1):
+        print(f"{i:>4}  {r['country']:<14}"
+              f"{r['total_annual_tonnes']:>13,.0f}"
+              f"{r['total_capex']:>16,.0f}"
+              f"{r['annual_revenue']:>16,.0f}"
+              f"{r['annual_net_income']:>16,.0f}"
+              f"{r['roi']:>7.1%}"
+              f"{r['payback_years']:>9.1f}y")
+    print("=" * 96)
+
+    # --- Full breakdown per country ---
+    print()
+    for r in results:
+        print(f"\n{r['country'].upper()}")
+        print(f"  Total imports:           {r['total_annual_tonnes']:>15,.0f} tonnes/year")
+        print(f"                           {r['daily_tonnes']:>15,.1f} tonnes/day")
+        print(f"  Infrastructure:")
+        print(f"    Container ports:       {r['container_ports']:>15}")
+        print(f"    Bulk ports:            {r['bulk_ports']:>15}")
+        print(f"    Tanker ports:          {r['tanker_ports']:>15}")
+        print(f"    Container ships:       {r['container_ships']:>15}")
+        print(f"    Bulk ships:            {r['bulk_ships']:>15}")
+        print(f"    Tanker ships:          {r['tanker_ships']:>15}")
+        print(f"    Warehouse capacity:    {r['warehouse_tonnes']:>15,.0f} tonnes")
+        print(f"  Capital investment:")
+        print(f"    Port capex:            ${r['port_capex']:>14,.0f}")
+        print(f"    Fleet capex:           ${r['fleet_capex']:>14,.0f}")
+        print(f"    Warehouse capex:       ${r['warehouse_capex']:>14,.0f}")
+        print(f"    TOTAL CAPEX:           ${r['total_capex']:>14,.0f}")
+        print(f"  Annual economics:")
+        print(f"    Revenue:               ${r['annual_revenue']:>14,.0f}")
+        print(f"    Net income (75%):      ${r['annual_net_income']:>14,.0f}")
+        print(f"    ROI:                   {r['roi']:>14.1%}")
+        print(f"    Payback period:        {r['payback_years']:>14.1f} years")
+
+
+if __name__ == "__main__":
+    main()
+
