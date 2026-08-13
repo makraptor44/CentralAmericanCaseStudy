@@ -1,2 +1,2 @@
 # CentralAmericanCaseStudy
-Statistical and Quantitiave anlalysis regarding ROI on Central American country's shipping industry.
+Statistical and Quantitative analysis regarding ROI in the Central American shipping industry.
